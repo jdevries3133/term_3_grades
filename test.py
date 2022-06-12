@@ -3,7 +3,7 @@ import unittest
 
 from teacherhelper.sis import Sis
 
-from main import LiveSchoolPoint, PointRecord, StudentNotFound
+from main import MAX_GRADE_FIFTH, MAX_GRADE_OTHER, LiveSchoolPoint, PointRecord, StudentNotFound
 
 sis = Sis.read_cache()
 
@@ -120,6 +120,14 @@ class TestPointRecord(BaseCase):
         for _ in range(2):
             self.rec.record_point(self.points.merit)
         self.assertEqual(self.rec.demerits_after_merits, 3)
+
+    def test_grade_cannot_exceed_max(self):
+        for _ in range(100):
+            self.rec.record_point(self.points.merit)
+        self.test_student.grade_level = 5
+        self.assertEqual(self.rec.final_points, MAX_GRADE_FIFTH)
+        self.test_student.grade_level = 6
+        self.assertEqual(self.rec.final_points, MAX_GRADE_OTHER)
 
     def test_final_points(self):
         cases = (

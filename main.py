@@ -94,7 +94,10 @@ class PointRecord:
         max_possible_grade = (
             MAX_GRADE_FIFTH if self.student.grade_level == 5 else MAX_GRADE_OTHER
         )
-        return max_possible_grade - self.demerits_after_merits
+        return min(
+            max_possible_grade,
+            max_possible_grade - self.demerits_after_merits
+        )
 
     def record_point(self, point: LiveSchoolPoint):
         assert point.student == self.student
@@ -117,6 +120,7 @@ class PointRecord:
 
 
 def get_points() -> list[LiveSchoolPoint]:
+    """Return the raw list of LiveSchoolPoints"""
     points: list[LiveSchoolPoint] = []
 
     with open("data.csv", "r") as fp:
@@ -130,17 +134,16 @@ def get_points() -> list[LiveSchoolPoint]:
     return points
 
 
-def main():
-    points = get_points()
+def get_grade_records(points: list[LiveSchoolPoint]) -> dict[str, PointRecord]:
+    """Grade records wrap LiveSchoolPoints, and group them by student so you
+    can quickly and easily get each students' grade.
+
+    Returns a mapping of student name to students' point record.
+    """
     records = {n: PointRecord(s) for n, s in sis.students.items()}
 
     for p in points:
         record = records[p.student.name]
         record.record_point(p)
 
-    for r in records.values():
-        print(f"{r.student.name}\t{r.final_points}")
-
-
-if __name__ == "__main__":
-    main()
+    return records
