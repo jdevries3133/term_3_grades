@@ -1,8 +1,6 @@
 import csv
 from dataclasses import dataclass
-from datetime import datetime
-import re
-from typing import cast
+from typing import Dict
 
 from teacherhelper.sis import Sis, Student
 
@@ -23,48 +21,28 @@ MAX_GRADE_OTHER = (
 )
 
 
+class StudentNotFound(Exception):
+    ...
+
+
 @dataclass
 class LiveSchoolPoint:
-    date: datetime
+    date: str
     student: Student
     value: int
 
     @classmethod
-    def from_row(cls, row: dict[str, str]):
-        date = cls.parse_date(row["Date"])
+    def from_row(cls, row: Dict[str, str]):
         student = sis.find_student(st_name := row["Student"])
         if student is None:
-            raise Exception(f"could not match student to name {st_name}")
+            raise StudentNotFound(f"could not match student to name {st_name}")
         value = int(row["Value"])
 
         return cls(
-            date=date,
+            date=row["Date"],
             student=student,
             value=value,
         )
-
-    @staticmethod
-    def parse_date(date: str) -> datetime:
-        """LiveSchool dates are in the form `Mon, 3/23`, where dates are not
-        zero-padded, all day strings are abbreivated with three letters, and
-        there is a comma and space in-between. The year is not provided, so we
-        refer to a global default year."""
-        pattern = re.compile(
-            r"""
-                (?P<month>\d{1,2})
-                /
-                (?P<day>\d{1,2})
-            """,
-            re.VERBOSE,
-        )
-        mo = pattern.search(date)
-        if mo is None:
-            raise ValueError(f"could not parse date {date}")
-
-        month = int(mo.group("month"))
-        day = int(mo.group("day"))
-
-        return datetime(month=month, day=day, year=DEFAULT_YEAR)
 
 
 class PointRecord:
@@ -76,48 +54,92 @@ class PointRecord:
         # affect grades, so we will keep track of demerits per day to ensure
         # that limit is not exceeded
         self._day_to_demerit_mapping = {}
+        self._override_demerits = None
 
     @property
-    def cumulative_demerits(self):
-        return sum(v for v in self._day_to_demerit_mapping.values())
+    def demerits(self):
+        """Demerits that count for grade deductions: the first three demerits
+        of the day."""
+        if self._override_demerits is not None:
+            return self._override_demerits
+        return sum(v if v < 3 else 3 for v in self._day_to_demerit_mapping.values())
 
     @property
-    def adjusted_demerits(self):
-        return self.cumulative_demerits - (self.cumulative_merits // 5)
+    def extra_demerits(self):
+        """Demerits beyond the first three of the day, which don't cause grade
+        deductions, but can absorb merits earned during the term and prevent
+        those merits from improving the overall grade."""
+        # we can't accurately calculate extra demerits when the demerit total
+        # has been overriden, because demerits will be stored in a fixed value
+        # and self._day_to_demerit_mapping is probably empty
+        if self._override_demerits is not None:
+            return 0
+
+        return sum(v for v in self._day_to_demerit_mapping.values()) - self.demerits
+
+    @property
+    def demerits_after_merits(self):
+        """Every 5 merits removes a demerit, although we also must consider
+        demerits beyond three demerits per day."""
+        return min(
+            self.demerits,
+            self.extra_demerits + self.demerits - (self.cumulative_merits // 5),
+        )
 
     @property
     def final_points(self):
-        max_grade = (
+        """Each demerit deducts one point from the highest possible term grade.
+        The highest possible term grade is different for fifth grade because
+        they only have two music classes per week"""
+        max_possible_grade = (
             MAX_GRADE_FIFTH if self.student.grade_level == 5 else MAX_GRADE_OTHER
         )
-        return max_grade - self.adjusted_demerits
+        return max_possible_grade - self.demerits_after_merits
 
     def record_point(self, point: LiveSchoolPoint):
         assert point.student == self.student
         # TODO: why do all that stupid parsing if I just end up turning it
         # back into a string here?...
-        day_identifier = f"{point.date.month}-{point.date.day}"
-        self._day_to_demerit_mapping.setdefault(day_identifier, 0)
+        self._day_to_demerit_mapping.setdefault(point.date, 0)
 
         # when counting a demerit, assign the demerit to that day in the
         # internal mapping, and don't let demerits per day rise above three
         if point.value < 0:
-            self._day_to_demerit_mapping[day_identifier] += abs(point.value)
-            if self._day_to_demerit_mapping[day_identifier] > 3:
-                self._day_to_demerit_mapping[day_identifier] = 3
+            self._day_to_demerit_mapping[point.date] += abs(point.value)
 
         else:
             self.cumulative_merits += point.value
 
     def _override_cumulative_demerits_for_testing(self, value: int):
-        self._day_to_demerit_mapping = {'override': value}
+        """Set a fixed demerit value and circumvent the rule about no more than
+        three demerits per day."""
+        self._override_demerits = value
 
 
-def main():
+def get_points() -> list[LiveSchoolPoint]:
+    points: list[LiveSchoolPoint] = []
+
     with open("data.csv", "r") as fp:
         rd = csv.DictReader(fp)
         for row in rd:
-            print(row)
+            try:
+                points.append(LiveSchoolPoint.from_row(row))
+            except StudentNotFound:
+                print(f'warning: did not find {row["Student"]}')
+
+    return points
+
+
+def main():
+    points = get_points()
+    records = {n: PointRecord(s) for n, s in sis.students.items()}
+
+    for p in points:
+        record = records[p.student.name]
+        record.record_point(p)
+
+    for r in records.values():
+        print(f"{r.student.name}\t{r.final_points}")
 
 
 if __name__ == "__main__":

@@ -1,10 +1,9 @@
 from dataclasses import dataclass
-from datetime import datetime
 import unittest
 
 from teacherhelper.sis import Sis
 
-from main import DEFAULT_YEAR, LiveSchoolPoint, PointRecord
+from main import LiveSchoolPoint, PointRecord, StudentNotFound
 
 sis = Sis.read_cache()
 
@@ -15,6 +14,7 @@ class BaseCase(unittest.TestCase):
         self.test_student = sis.students[list(sis.students.keys())[0]]
 
         self.example_rows = [
+            # demerit example
             {
                 "Date": "Tue, 2/22",
                 "Time": "12:57 p.m.",
@@ -27,12 +27,27 @@ class BaseCase(unittest.TestCase):
                 "Location": "Classroom",
                 "Comment": "repeatedly having conversations and derailing the lesson",
             },
+            # merit example
             {
                 "Date": "Wed, 12/2",
                 "Time": "1:34 p.m.",
                 "Teacher": "Mr. Devries",
                 "Roster": "Homeroom 4 - Carrie -",
                 "Student": self.test_student.name,
+                "Item": "Respectful to Staff and Students",
+                "Category": "S.T.A.R. Behaviors",
+                "Value": "1",
+                "Location": "Classroom",
+                "Comment": "",
+            },
+            # name won't match example
+            {
+                "Date": "Wed, 12/2",
+                "Time": "1:34 p.m.",
+                "Teacher": "Mr. Devries",
+                "Roster": "Homeroom 4 - Carrie -",
+                # hopefully no one has this name, for the relevant test case to work...
+                "Student": "ferageragwagrwegerbaerberabebtetabetbateaebaefadbfadbdfberbebtetafdbdfabtebtahbntabatbtabeberbeabtaebbaettbetbaet",
                 "Item": "Respectful to Staff and Students",
                 "Category": "S.T.A.R. Behaviors",
                 "Value": "1",
@@ -52,7 +67,7 @@ class TestPointRecord(BaseCase):
             demerit: LiveSchoolPoint
 
         self.rec = PointRecord(self.test_student)
-        points = [LiveSchoolPoint.from_row(row) for row in self.example_rows]
+        points = [LiveSchoolPoint.from_row(row) for row in self.example_rows[0:2]]
 
         self.points = Points(merit=points[1], demerit=points[0])
 
@@ -60,12 +75,12 @@ class TestPointRecord(BaseCase):
 
         self.rec.record_point(self.points.demerit)
 
-        self.assertEqual(self.rec.adjusted_demerits, 1)
+        self.assertEqual(self.rec.demerits_after_merits, 1)
 
         # adjusted demerits does not change because we just go from 0 to 1
         # point. The demerit won't go away until we record 5 merits
         self.rec.record_point(self.points.merit)
-        self.assertEqual(self.rec.adjusted_demerits, 1)
+        self.assertEqual(self.rec.demerits_after_merits, 1)
 
         for _ in range(1, 5):
             # more than 3 self.points on the same point don't affect the total grade,
@@ -74,27 +89,41 @@ class TestPointRecord(BaseCase):
             self.rec.record_point(self.points.merit)
 
         # now that there are 5 points, the adjusted total goes back down to zero
-        self.assertEqual(self.rec.adjusted_demerits, 0)
+        self.assertEqual(self.rec.demerits_after_merits, 0)
 
         # but if we add another demerit, it goes back to 1
         self.rec.record_point(self.points.demerit)
-        self.assertEqual(self.rec.adjusted_demerits, 1)
+        self.assertEqual(self.rec.demerits_after_merits, 1)
 
     def test_record_point_3_point_demerit_limit(self):
         # as stated earlier, more than 3 self.points on the same day shouldn't have
         # an effect
         for _ in range(20):
             self.rec.record_point(self.points.demerit)
-        self.assertEqual(self.rec.adjusted_demerits, 3)
+        self.assertEqual(self.rec.demerits_after_merits, 3)
 
     def test_record_point_no_merit_limit(self):
         for _ in range(20):
             self.rec.record_point(self.points.merit)
         self.assertEqual(self.rec.cumulative_merits, 20)
 
+    def test_extra_demerits(self):
+        for _ in range(20):
+            self.rec.record_point(self.points.demerit)
+        self.assertEqual(self.rec.extra_demerits, 17)
+
+    def test_adjusted_demerits_uses_lower_adjusted_value_when_many_extras_are_present(
+        self,
+    ):
+        for _ in range(20):
+            self.rec.record_point(self.points.demerit)
+        for _ in range(2):
+            self.rec.record_point(self.points.merit)
+        self.assertEqual(self.rec.demerits_after_merits, 3)
+
     def test_final_points(self):
         cases = (
-            # merits, demerits, grade_level, expected_total
+            # merits, demerits (override), grade_level, expected_total
             (7, 4, 6, 69),
             (8, 5, 7, 68),
             (3, 9, 5, 27),
@@ -108,10 +137,10 @@ class TestPointRecord(BaseCase):
 
     def test_demerit_overrider(self):
         self.rec._override_cumulative_demerits_for_testing(20)
-        self.assertEqual(self.rec.cumulative_demerits, 20)
+        self.assertEqual(self.rec.demerits, 20)
 
         self.rec._override_cumulative_demerits_for_testing(31)
-        self.assertEqual(self.rec.cumulative_demerits, 31)
+        self.assertEqual(self.rec.demerits, 31)
 
 
 class TestLiveSchoolPoint(BaseCase):
@@ -119,17 +148,9 @@ class TestLiveSchoolPoint(BaseCase):
         result = LiveSchoolPoint.from_row(self.example_rows[0])
         self.assertIsInstance(result, LiveSchoolPoint)
 
-    def test_parse_date(self):
-        cases = (
-            ("Tuesday, 3/23", datetime(DEFAULT_YEAR, 3, 23)),
-            ("Wed, 12/2", datetime(DEFAULT_YEAR, 12, 2)),
-            ("Wed, 10/05", datetime(DEFAULT_YEAR, 10, 5)),
-        )
-        for input, output in cases:
-            self.assertEqual(LiveSchoolPoint.parse_date(input), output)
-
-        with self.assertRaisesRegex(ValueError, "could not parse date"):
-            LiveSchoolPoint.parse_date("Monday 2/")
+    def test_student_not_found(self):
+        with self.assertRaisesRegex(StudentNotFound, "could not match student to name"):
+            LiveSchoolPoint.from_row(self.example_rows[2])
 
 
 if __name__ == "__main__":
